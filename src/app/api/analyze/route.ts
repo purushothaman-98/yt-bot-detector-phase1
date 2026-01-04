@@ -1,9 +1,8 @@
 // src/app/api/analyze/route.ts
 import { NextResponse } from "next/server";
 import { extractYouTubeVideoId } from "@/lib/videoId";
-import { fetchTopLevelComments } from "@/lib/youtube";
+import { fetchTopLevelComments, fetchVideoMeta } from "@/lib/youtube";
 import { scoreComments, summarize } from "@/lib/scoring";
-
 export const runtime = "nodejs";
 
 type AnalyzeRequest = {
@@ -33,6 +32,7 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
+    const video = await fetchVideoMeta({ apiKey, videoId });
 
     const comments = await fetchTopLevelComments({ videoId, apiKey, maxComments });
     const scored = scoreComments(comments);
@@ -42,15 +42,17 @@ export async function POST(req: Request) {
     scored.sort((a, b) => b.botScore - a.botScore);
 
     return NextResponse.json({
+      video,
       videoId,
       fetched: comments.length,
       summary,
       comments: scored,
       threshold: 60,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
     return NextResponse.json(
-      { error: err?.message ?? "Unknown error" },
+      { error: message },
       { status: 500 }
     );
   }

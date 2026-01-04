@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import type { VideoMeta } from "@/lib/youtube";
 
 type TopFlag = { flag: string; count: number };
 
@@ -26,6 +27,7 @@ type ApiResponse = {
     topFlags: TopFlag[];
   };
   comments: ApiComment[];
+  video: VideoMeta | null;
   error?: string;
 };
 
@@ -41,7 +43,7 @@ function downloadCsv(rows: ApiComment[], filename: string) {
     "text",
   ];
 
-  const esc = (s: any) => {
+  const esc = (s: unknown) => {
     const str = String(s ?? "");
     // CSV escape
     if (/[",\n]/.test(str)) return `"${str.replace(/"/g, '""')}"`;
@@ -123,8 +125,9 @@ export default function Page() {
 
       setData(json);
       setMinScore(0);
-    } catch (e: any) {
-      setError(e?.message ?? "Network error");
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : "Network error";
+      setError(message);
     } finally {
       setLoading(false);
     }
@@ -176,6 +179,27 @@ export default function Page() {
             </div>
           )}
         </div>
+
+        {data?.video && (
+          <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 flex gap-4 items-center">
+            {data.video.thumbnailUrl && (
+              <img
+                src={data.video.thumbnailUrl}
+                alt="thumbnail"
+                className="w-28 h-16 object-cover rounded-xl border border-white/10"
+              />
+            )}
+            <div className="min-w-0">
+              <div className="text-lg font-semibold truncate">{data.video.title}</div>
+              <div className="text-white/70 text-sm truncate">{data.video.channelTitle}</div>
+              {data.video.publishedAt && (
+                <div className="text-white/50 text-xs">
+                  {new Date(data.video.publishedAt).toLocaleString()}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {data && (
           <>
