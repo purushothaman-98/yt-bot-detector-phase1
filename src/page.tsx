@@ -1,65 +1,119 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
 
 export default function Home() {
+  const [url, setUrl] = useState("");
+  const [maxComments, setMaxComments] = useState(500);
+  const [useAi, setUseAi] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<any>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function analyze() {
+    setLoading(true);
+    setError(null);
+    setResult(null);
+
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url,
+          maxComments,
+          useAi, // ✅ THIS IS THE LINE YOU ASKED ABOUT
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Analysis failed");
+
+      setResult(data);
+    } catch (err: any) {
+      setError(err.message || "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+    <main className="min-h-screen bg-zinc-950 text-zinc-100 p-8">
+      <div className="max-w-3xl mx-auto space-y-6">
+        <h1 className="text-2xl font-semibold">
+          YouTube Comment Bot Analyzer
+        </h1>
+
+        <div className="space-y-3">
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="Paste YouTube video URL"
+            className="w-full rounded-lg bg-zinc-900 border border-zinc-700 px-3 py-2"
+          />
+
+          <div className="flex gap-4 items-center">
+            <input
+              type="number"
+              value={maxComments}
+              min={50}
+              max={5000}
+              onChange={(e) => setMaxComments(Number(e.target.value))}
+              className="w-32 rounded-lg bg-zinc-900 border border-zinc-700 px-3 py-2"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={useAi}
+                onChange={(e) => setUseAi(e.target.checked)}
+              />
+              Gemini AI analysis
+            </label>
+          </div>
+
+          <button
+            onClick={analyze}
+            disabled={loading || !url}
+            className="rounded-lg bg-white text-black px-4 py-2 disabled:opacity-50"
           >
-            Documentation
-          </a>
+            {loading ? "Analyzing..." : "Analyze"}
+          </button>
         </div>
-      </main>
-    </div>
+
+        {error && (
+          <div className="text-red-400 text-sm">{error}</div>
+        )}
+
+        {result && (
+          <div className="mt-6 space-y-4">
+            <div className="rounded-lg bg-zinc-900 p-4">
+              <div className="font-medium">{result.video?.title}</div>
+              <div className="text-sm text-zinc-400">
+                {result.video?.channelTitle}
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-zinc-900 p-4 text-sm">
+              <div>Total comments: {result.fetched}</div>
+              <div>
+                Suspicious: {result.summary?.suspicious} (
+                {result.summary?.suspiciousPct}%)
+              </div>
+            </div>
+
+            {result.aiReport && (
+              <div className="rounded-lg bg-zinc-900 p-4">
+                <div className="font-medium">Gemini AI verdict</div>
+                <div className="text-sm text-zinc-300">
+                  {result.aiReport.verdict} · Bot %
+                  {result.aiReport.overall_bot_pct}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </main>
   );
 }

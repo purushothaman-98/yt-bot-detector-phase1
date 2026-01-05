@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Image from "next/image";
 import type { VideoMeta } from "@/lib/youtube";
 
 type TopFlag = { flag: string; count: number };
@@ -88,6 +89,7 @@ export default function Page() {
 
   const [minScore, setMinScore] = useState(0);
   const [search, setSearch] = useState("");
+  const [useAi, setUseAi] = useState(false);
 
   const filtered = useMemo(() => {
     const rows = data?.comments ?? [];
@@ -112,7 +114,7 @@ export default function Page() {
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, maxComments }),
+        body: JSON.stringify({ url, maxComments, useAi }),
       });
 
       const json = (await res.json()) as ApiResponse;
@@ -163,6 +165,17 @@ export default function Page() {
                 onChange={(e) => setMaxComments(Number(e.target.value))}
                 className="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-zinc-600"
               />
+              <div className="mt-2">
+                <label className="flex items-center text-sm text-zinc-300">
+                  <input
+                    type="checkbox"
+                    checked={useAi}
+                    onChange={(e) => setUseAi(e.target.checked)}
+                    className="mr-2"
+                  />
+                  Enable AI analysis (requires GEMINI_API_KEY)
+                </label>
+              </div>
               <button
                 onClick={analyze}
                 disabled={loading || !url.trim()}
@@ -183,9 +196,11 @@ export default function Page() {
         {data?.video && (
           <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 flex gap-4 items-center">
             {data.video.thumbnailUrl && (
-              <img
+              <Image
                 src={data.video.thumbnailUrl}
                 alt="thumbnail"
+                width={112}
+                height={64}
                 className="w-28 h-16 object-cover rounded-xl border border-white/10"
               />
             )}
