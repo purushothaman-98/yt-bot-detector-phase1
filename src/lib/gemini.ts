@@ -1,134 +1,123 @@
 // src/lib/gemini.ts
-export type GeminiPerComment = {
+
+type GeminiInputItem = {
   idx: number;
-  ai_score: number; // 0..100
-  label: "bot" | "human" | "uncertain";
-  reason: string;
+  author: string;
+  text: string;
+  likes: number;
+  publishedAt: string;
+  ruleScore: number;
+  flags: string[];
 };
 
-export type GeminiBotReport = {
-  overall_bot_pct: number; // 0..100
-  verdict: "bot-heavy" | "mixed" | "mostly-human" | "uncertain";
-  key_signals: string[];
-  per_comment: GeminiPerComment[];
+type GeminiResult = {
+  summary: {
+    verdict: "bot-heavy" | "mixed" | "mostly-human";
+    confidence: number; // 0–100
+  };
+  per_comment: Array<{
+    idx: number;
+    ai_score: number; // 0–100
+    label: "bot" | "human" | "uncertain";
+    reason: string;
+  }>;
 };
 
-function stripCodeFences(s: string) {
-  return s.replace(/```json\s*/i, "").replace(/```/g, "").trim();
+/**
+ * Extract the first valid JSON object from a text blob
+ */
+function extractJson(text: string): any {
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) {
+    throw new Error("No JSON object found in Gemini response");
+  }
+  return JSON.parse(match[0]);
 }
 
-export async function geminiBotAnalyze(opts: {
+export async function geminiBotAnalyze({
+  apiKey,
+  model,
+  videoId,
+  items,
+}: {
   apiKey: string;
-  model?: string;
+  model: string;
   videoId: string;
-  // we send reduced objects only
-  items: Array<{
-    idx: number;
-    author: string;
-    text: string;
-    likes: number;
-    publishedAt: string;
-    ruleScore: number;
-    flags: string[];
-  }>;
-}): Promise<GeminiBotReport> {
-  const model = opts.model || "gemini-2.5-flash";
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    model
-  )}:generateContent`;
+  items: GeminiInputItem[];
+}): Promise<GeminiResult> {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
-  const system = `
-You are analyzing YouTube comments to detect bots/spam.
-Return STRICT JSON ONLY (no markdown, no backticks).
-Be conservative: do not label excited fans as bots unless there are strong signs (links, contact bait, repeated templates, scams).
-`;
+  const prompt = `
+You are a bot-detection system.
 
-  const schemaHint = `
-JSON schema:
+TASK:
+Analyze YouTube comments and decide whether they are bot-generated or human.
+
+STRICT RULES:
+- Output ONLY valid JSON
+- No markdown
+- No explanation outside JSON
+- Follow the schema EXACTLY
+
+SCHEMA:
 {
-  "overall_bot_pct": number,
-  "verdict": "bot-heavy" | "mixed" | "mostly-human" | "uncertain",
-  "key_signals": string[],
+  "summary": {
+    "verdict": "bot-heavy" | "mixed" | "mostly-human",
+    "confidence": number
+  },
   "per_comment": [
-    { "idx": number, "ai_score": number, "label": "bot" | "human" | "uncertain", "reason": string }
+    {
+      "idx": number,
+      "ai_score": number,
+      "label": "bot" | "human" | "uncertain",
+      "reason": string
+    }
   ]
 }
-Rules:
-- ai_score 0..100
-- Keep reason short (<= 140 chars)
-- per_comment length must match provided list length
+
+VIDEO_ID: ${videoId}
+
+COMMENTS:
+${JSON.stringify(items, null, 2)}
 `;
 
-  const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: [
-          { text: system.trim() },
-          { text: schemaHint.trim() },
-          {
-            text: `Video: ${opts.videoId}\nComments:\n${JSON.stringify(
-              opts.items,
-              null,
-              2
-            )}`,
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 1200,
-    },
-  };
-
-  const res = await fetch(url, {
+  const res = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-goog-api-key": opts.apiKey,
-    },
-    body: JSON.stringify(payload),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: prompt }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 2048,
+      },
+    }),
   });
 
-  const data: any = await res.json();
-
   if (!res.ok) {
-    const msg = data?.error?.message || "Gemini request failed";
-    throw new Error(msg);
+    const errText = await res.text();
+    throw new Error(`Gemini HTTP error ${res.status}: ${errText}`);
   }
+
+  const raw = await res.json();
 
   const text =
-    data?.candidates?.[0]?.content?.parts?.map((p: any) => p?.text).filter(Boolean).join("\n") ??
-    "";
+    raw?.candidates?.[0]?.content?.parts
+      ?.map((p: any) => p.text)
+      .join("") ?? "";
 
-  if (!text) throw new Error("Gemini returned empty response");
-
-  let parsed: any;
-  try {
-    parsed = JSON.parse(stripCodeFences(text));
-  } catch {
-    // If Gemini ever returns extra text, try to salvage JSON object
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) throw new Error("Gemini response not valid JSON");
-    parsed = JSON.parse(stripCodeFences(m[0]));
+  if (!text) {
+    throw new Error("Empty Gemini response");
   }
 
-  // basic validation & normalization
-  const report: GeminiBotReport = {
-    overall_bot_pct: Math.max(0, Math.min(100, Number(parsed.overall_bot_pct ?? 0))),
-    verdict: parsed.verdict ?? "uncertain",
-    key_signals: Array.isArray(parsed.key_signals) ? parsed.key_signals.slice(0, 12) : [],
-    per_comment: Array.isArray(parsed.per_comment) ? parsed.per_comment : [],
-  };
-
-  // normalize per_comment
-  report.per_comment = report.per_comment.map((x: any) => ({
-    idx: Number(x.idx),
-    ai_score: Math.max(0, Math.min(100, Number(x.ai_score ?? 0))),
-    label: x.label === "bot" || x.label === "human" ? x.label : "uncertain",
-    reason: String(x.reason ?? "").slice(0, 200),
-  }));
-
-  return report;
+  try {
+    return extractJson(text) as GeminiResult;
+  } catch (e) {
+    console.error("Raw Gemini output:", text);
+    throw new Error("Gemini response not valid JSON");
+  }
 }
