@@ -1,85 +1,34 @@
 // src/lib/scoring.ts
 import type { YouTubeComment } from "./youtube";
 
+export type AiOnComment = {
+  score: number | null;
+  label: "bot" | "human" | "uncertain";
+  reason: string;
+};
+
 export type ScoredComment = YouTubeComment & {
   botScore: number; // 0..100
   flags: string[];
+  ai?: AiOnComment;
 };
 
-// -------------------------
-// Helpers
-// -------------------------
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
 }
 
-function safeStr(x: any): string {
-  return typeof x === "string" ? x : "";
-}
-
-function normalizeWhitespace(s: string): string {
-  return s.replace(/\s+/g, " ").trim();
-}
-
-function stripUrls(s: string): string {
-  // remove typical URL patterns for fingerprinting
-  return s
-    .replace(/https?:\/\/\S+/gi, " ")
-    .replace(/\bwww\.\S+/gi, " ")
-    .replace(/\byoutu\.be\/\S+/gi, " ")
-    .replace(/\byoutube\.com\/\S+/gi, " ");
-}
-
-function stripMentionsAndTags(s: string): string {
-  return s
-    .replace(/@\w+/g, " ")
-    .replace(/#[\p{L}\p{N}_]+/gu, " ");
-}
-
-function stripPunctuation(s: string): string {
-  // keep letters/numbers/spaces for fingerprint
-  return s.replace(/[^\p{L}\p{N}\s]/gu, " ");
-}
-
-function normalizeForFingerprint(text: string): string {
-  // Goal: detect repeated templates, so remove volatile tokens (urls/mentions) and punctuation
-  const s = safeStr(text)
-    .normalize("NFKD")
-    .toLowerCase();
-  return normalizeWhitespace(stripPunctuation(stripMentionsAndTags(stripUrls(s))));
+function normalizeText(s: string): string {
+  return (s ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .replace(/https?:\/\/\S+/g, " ")
+    .replace(/@\w+|\bwww\.\S+/g, " ")
+    .trim();
 }
 
 function countMatches(re: RegExp, s: string): number {
   const m = s.match(re);
   return m ? m.length : 0;
-}
-
-function extractUrls(s: string): string[] {
-  const urls: string[] = [];
-  const re = /(https?:\/\/\S+)|(\bwww\.\S+)|(\byoutu\.be\/\S+)|(\byoutube\.com\/\S+)/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) {
-    urls.push(m[0]);
-  }
-  return urls;
-}
-
-function hasEmail(s: string): boolean {
-  return /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(s);
-}
-
-function hasPhoneLike(s: string): boolean {
-  // fairly strict-ish: +country optional, 8-15 digits overall allowing spaces/dashes
-  // avoids flagging years/dates too often
-  const cleaned = s.replace(/[^\d+]/g, "");
-  if (!cleaned) return false;
-
-  // patterns like +91xxxxxxxxxx
-  if (/^\+\d{8,15}$/.test(cleaned)) return true;
-
-  // plain digit runs, but require >=10 digits and not too many plus signs
-  const digitRuns = s.match(/\d{10,15}/g);
-  return !!digitRuns && digitRuns.length > 0;
 }
 
 function uppercaseRatio(s: string): number {
@@ -90,316 +39,131 @@ function uppercaseRatio(s: string): number {
 }
 
 function emojiCount(s: string): number {
-  // Works on modern Node (used by Next). Fallback if unsupported.
-  try {
-    const re = /\p{Extended_Pictographic}/gu;
-    return countMatches(re, s);
-  } catch {
-    // very rough fallback
-    return countMatches(/[\u{1F300}-\u{1FAFF}]/gu, s);
-  }
+  // Unicode property class; works in modern Node/JS
+  return countMatches(/\p{Extended_Pictographic}/gu, s);
 }
 
-function repeatedCharRun(s: string): number {
-  // longest run of same character, e.g., "!!!!!!!!!" or "loooove"
-  let best = 1;
-  let cur = 1;
-  for (let i = 1; i < s.length; i++) {
-    if (s[i] === s[i - 1]) {
-      cur++;
-      best = Math.max(best, cur);
-    } else {
-      cur = 1;
-    }
-  }
-  return best;
+function hasSpamKeywords(s: string): boolean {
+  const t = normalizeText(s);
+  return (
+    /\b(telegram|whatsapp|dm me|direct message|contact me|invest|crypto|forex|profit|giveaway|earn|winner|promote|promo)\b/.test(
+      t
+    ) || /\b(bit\.ly|t\.me|wa\.me)\b/.test(t)
+  );
 }
 
-function repeatedWordCount(s: string): number {
-  // count consecutive repeated words (simple)
-  const words = normalizeWhitespace(s.toLowerCase()).split(" ").filter(Boolean);
-  let reps = 0;
-  for (let i = 1; i < words.length; i++) {
-    if (words[i] === words[i - 1]) reps++;
-  }
-  return reps;
+function urlCount(s: string): number {
+  return countMatches(/https?:\/\/\S+/g, s) + countMatches(/\bwww\.\S+/g, s);
 }
 
-function hashtagCount(s: string): number {
-  return countMatches(/#[\p{L}\p{N}_]+/gu, s);
-}
-
-function isMostlyNonLetters(text: string): boolean {
-  const s = safeStr(text);
-  const letters = countMatches(/[\p{L}]/gu, s);
-  const total = s.length;
-  if (total < 10) return false;
-  return letters / total < 0.15; // mostly emojis/symbols/links
-}
-
-// -------------------------
-// Keyword sets (tuned for Phase-1)
-// -------------------------
-const CONTACT_BAIT = [
-  "whatsapp",
-  "telegram",
-  "t.me",
-  "wa.me",
-  "inbox",
-  "dm me",
-  "message me",
-  "text me",
-  "contact me",
-  "call me",
-  "reach me",
-  "my number",
-];
-
-const PROMO_BAIT = [
-  "subscribe",
-  "sub4sub",
-  "follow me",
-  "check my channel",
-  "visit my channel",
-  "support my channel",
-  "like and subscribe",
-  "join my channel",
-];
-
-const SCAM_GIVEAWAY = [
-  "giveaway",
-  "winner",
-  "won",
-  "congratulations",
-  "claim",
-  "prize",
-  "gift",
-  "free",
-  "limited offer",
-  "urgent",
-  "click",
-  "link in bio",
-];
-
-const CRYPTO_INVEST = [
-  "crypto",
-  "bitcoin",
-  "btc",
-  "eth",
-  "usdt",
-  "forex",
-  "investment",
-  "trading",
-  "profit",
-  "earn",
-  "double",
-  "guaranteed",
-  "airdrop",
-];
-
-const LINK_SHORTENERS = [
-  "bit.ly",
-  "tinyurl.com",
-  "t.co",
-  "goo.gl",
-  "ow.ly",
-  "is.gd",
-  "cutt.ly",
-  "rb.gy",
-  "rebrand.ly",
-  "shorturl.at",
-];
-
-function includesAny(textLower: string, needles: string[]): string[] {
-  const hits: string[] = [];
-  for (const n of needles) {
-    if (textLower.includes(n)) hits.push(n);
-  }
-  return hits;
-}
-
-// -------------------------
-// Main scoring
-// -------------------------
 export function scoreComments(comments: YouTubeComment[]): ScoredComment[] {
-  // 1) Build fingerprint frequency map for template/duplicate detection
-  const fpCount = new Map<string, number>();
-  const fps: string[] = new Array(comments.length).fill("");
-
-  for (let i = 0; i < comments.length; i++) {
-    const text = safeStr((comments[i] as any).text ?? (comments[i] as any).comment ?? "");
-    const fp = normalizeForFingerprint(text);
-    fps[i] = fp;
-
-    // Ignore extremely short fingerprints (avoid false duplicates like "nice")
-    if (fp.length >= 18) {
-      fpCount.set(fp, (fpCount.get(fp) ?? 0) + 1);
-    }
+  // Template/duplicate detection based on normalized text frequency
+  const freq = new Map<string, number>();
+  for (const c of comments) {
+    const key = normalizeText(c.text);
+    if (!key) continue;
+    freq.set(key, (freq.get(key) ?? 0) + 1);
   }
 
-  // 2) Score each comment using improved heuristics + duplicate boost
-  const out: ScoredComment[] = comments.map((c, idx) => {
-    const text = safeStr((c as any).text ?? (c as any).comment ?? "");
-    const textTrim = text.trim();
-    const textLower = textTrim.toLowerCase();
-
+  const scored: ScoredComment[] = comments.map((c) => {
     const flags: string[] = [];
-    let points = 0;
+    let score = 0;
 
-    // --- Strong signals: links & contact ---
-    const urls = extractUrls(textTrim);
-    if (urls.length > 0) {
-      const add = clamp(20 + urls.length * 10, 20, 55);
-      points += add;
-      flags.push(urls.length === 1 ? "contains link" : `contains links (${urls.length})`);
+    const text = c.text ?? "";
+    const norm = normalizeText(text);
+
+    // 1) Links
+    const links = urlCount(text);
+    if (links >= 1) {
+      score += 25;
+      flags.push(`contains link (${links})`);
     }
 
-    const shortenerHit = LINK_SHORTENERS.find((d) => textLower.includes(d));
-    if (shortenerHit) {
-      points += 18;
-      flags.push("link shortener");
+    // 2) Spam keywords
+    if (hasSpamKeywords(text)) {
+      score += 20;
+      flags.push("spam keywords");
     }
 
-    if (hasEmail(textTrim)) {
-      points += 18;
-      flags.push("email present");
+    // 3) Emoji burst
+    const e = emojiCount(text);
+    if (e >= 8) {
+      score += 12;
+      flags.push(`many emojis (${e})`);
+    } else if (e >= 5) {
+      score += 7;
+      flags.push(`many emojis (${e})`);
     }
 
-    if (hasPhoneLike(textTrim)) {
-      points += 30;
-      flags.push("phone number pattern");
-    }
-
-    const contactHits = includesAny(textLower, CONTACT_BAIT);
-    if (contactHits.length > 0) {
-      points += 28;
-      flags.push("contact bait");
-    }
-
-    // --- Scam / giveaway / crypto ---
-    const scamHits = includesAny(textLower, SCAM_GIVEAWAY);
-    if (scamHits.length > 0) {
-      points += clamp(14 + scamHits.length * 4, 14, 30);
-      flags.push("giveaway/scam keywords");
-    }
-
-    const cryptoHits = includesAny(textLower, CRYPTO_INVEST);
-    if (cryptoHits.length > 0) {
-      points += clamp(14 + cryptoHits.length * 4, 14, 30);
-      flags.push("crypto/invest keywords");
-    }
-
-    // --- Self promo (lower than scams) ---
-    const promoHits = includesAny(textLower, PROMO_BAIT);
-    if (promoHits.length > 0) {
-      points += clamp(10 + promoHits.length * 3, 10, 22);
-      flags.push("self-promo bait");
-    }
-
-    // --- Duplicate/template detection (big win) ---
-    const fp = fps[idx];
-    const freq = fp.length >= 18 ? (fpCount.get(fp) ?? 0) : 0;
-    if (freq >= 3) {
-      // scale with frequency; heavy because bot farms reuse templates
-      const dupBoost = clamp(25 + Math.floor((freq - 3) * 6), 25, 60);
-      points += dupBoost;
-      flags.push(`template/duplicate x${freq}`);
-    }
-
-    // --- Style/format signals (lighter weights to reduce false positives) ---
-    const em = emojiCount(textTrim);
-    if (em >= 7) {
-      points += em >= 15 ? 12 : 7;
-      flags.push(`many emojis (${em})`);
-    }
-
-    const up = uppercaseRatio(textTrim);
-    const letterCount = countMatches(/[A-Za-z]/g, textTrim);
-    if (letterCount >= 10 && up >= 0.85) {
-      points += up >= 0.95 ? 10 : 7;
-      flags.push(`high uppercase (${Math.round(up * 100)}%)`);
-    }
-
-    const punct = countMatches(/[!?.,:;'"“”‘’()\[\]{}]/g, textTrim);
+    // 4) Excess punctuation
+    const punct = countMatches(/[!?.,:;]+/g, text);
     if (punct >= 10) {
-      points += 6;
+      score += 10;
       flags.push("punctuation burst");
     }
 
-    const run = repeatedCharRun(textTrim);
-    if (run >= 6) {
-      points += run >= 10 ? 8 : 5;
-      flags.push("repeated chars");
+    // 5) Excess uppercase
+    const up = uppercaseRatio(text);
+    if (up >= 0.8 && text.length >= 10) {
+      score += 12;
+      flags.push(`high uppercase (${Math.round(up * 100)}%)`);
     }
 
-    const reps = repeatedWordCount(textTrim);
-    if (reps >= 2) {
-      points += 6;
-      flags.push("repeated words");
-    }
-
-    const tags = hashtagCount(textTrim);
-    if (tags >= 5) {
-      points += 6;
-      flags.push(`many hashtags (${tags})`);
-    }
-
-    if (isMostlyNonLetters(textTrim)) {
-      points += 6;
-      flags.push("mostly symbols/emojis");
-    }
-
-    // --- Length sanity (small tweaks) ---
-    const len = textTrim.length;
-    if (len <= 4) {
-      points += 3;
+    // 6) Very short generic praise (often bot-like)
+    if (norm.length > 0 && norm.length <= 8) {
+      score += 6;
       flags.push("very short");
-    } else if (len >= 280) {
-      // long spam walls sometimes
-      points += 4;
-      flags.push("very long");
     }
 
-    // --- Convert points to 0..100 score ---
-    // Keep linear but capped; points already weighted to be meaningful.
-    const botScore = clamp(Math.round(points), 0, 100);
+    // 7) Duplicate/template comments
+    const f = norm ? (freq.get(norm) ?? 0) : 0;
+    if (f >= 3) {
+      score += 18;
+      flags.push(`template/duplicate x${f}`);
+    } else if (f === 2) {
+      score += 10;
+      flags.push("duplicate x2");
+    }
+
+    // 8) Low-effort author pattern (optional heuristic)
+    // (Don't over-weight this; many legit users have numbers)
+    if (/\d{4,}/.test(c.author ?? "")) {
+      score += 4;
+      flags.push("author has many digits");
+    }
+
+    score = clamp(score, 0, 100);
 
     return {
-      ...(c as any),
-      botScore,
+      ...c,
+      botScore: score,
       flags,
-    } as ScoredComment;
+    };
   });
 
-  return out;
+  return scored;
 }
 
-// -------------------------
-// Summary for UI
-// -------------------------
-export type Summary = {
-  total: number;
-  suspicious: number;
-  suspiciousPct: number;
-  topFlags: { flag: string; count: number }[];
-};
-
-export function summarize(scored: ScoredComment[], threshold = 60): Summary {
-  const total = scored.length;
+export function summarize(scored: ScoredComment[]) {
+  const threshold = 60;
   const suspicious = scored.filter((c) => c.botScore >= threshold).length;
-  const suspiciousPct = total === 0 ? 0 : Math.round((suspicious / total) * 1000) / 10;
+  const total = scored.length || 1;
+  const pct = Math.round((suspicious / total) * 100);
 
-  const counts = new Map<string, number>();
+  const flagCounts = new Map<string, number>();
   for (const c of scored) {
-    for (const f of c.flags) {
-      counts.set(f, (counts.get(f) ?? 0) + 1);
-    }
+    for (const f of c.flags) flagCounts.set(f, (flagCounts.get(f) ?? 0) + 1);
   }
 
-  const topFlags = Array.from(counts.entries())
+  const topFlags = [...flagCounts.entries()]
     .sort((a, b) => b[1] - a[1])
     .slice(0, 12)
     .map(([flag, count]) => ({ flag, count }));
 
-  return { total, suspicious, suspiciousPct, topFlags };
+  return {
+    total,
+    suspicious,
+    percentSuspicious: pct,
+    topFlags,
+  };
 }

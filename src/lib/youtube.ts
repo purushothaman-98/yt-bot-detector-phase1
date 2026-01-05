@@ -1,81 +1,111 @@
 // src/lib/youtube.ts
 
-export type VideoMeta = {
-  videoId: string;
+export type YouTubeComment = {
+  id: string;
+  author: string;
+  text: string;
+  likeCount: number;
+  publishedAt: string;
+  authorChannelId?: string;
+  authorProfileImageUrl?: string;
+};
+
+export type YouTubeVideoMeta = {
+  id: string;
   title: string;
   channelTitle: string;
-  publishedAt?: string;
-  thumbnailUrl?: string;
-};
-
-export type YouTubeComment = {
-  text: string;
-  authorDisplayName: string;
   publishedAt: string;
-  likeCount: number;
+  thumbnailUrl: string;
 };
 
-export async function fetchVideoMeta(opts: { apiKey: string; videoId: string }): Promise<VideoMeta | null> {
-  const { apiKey, videoId } = opts;
+async function ytFetch(url: string) {
+  const res = await fetch(url);
+  const text = await res.text();
+  if (!res.ok) throw new Error(`YouTube API error (${res.status}): ${text.slice(0, 500)}`);
+  return JSON.parse(text) as any;
+}
+
+export async function fetchVideoMeta(args: {
+  apiKey: string;
+  videoId: string;
+}): Promise<YouTubeVideoMeta> {
+  const { apiKey, videoId } = args;
 
   const url =
-    `https://www.googleapis.com/youtube/v3/videos` +
+    "https://www.googleapis.com/youtube/v3/videos" +
     `?part=snippet&id=${encodeURIComponent(videoId)}` +
     `&key=${encodeURIComponent(apiKey)}`;
 
-  const res = await fetch(url, { cache: "no-store" });
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data?.error?.message ?? "YouTube videos.list failed");
-  }
+  const data = await ytFetch(url);
 
   const item = data?.items?.[0];
-  if (!item) return null;
+  if (!item) throw new Error("Video not found (check video ID / API key permissions).");
 
   const sn = item.snippet;
   const thumbs = sn?.thumbnails ?? {};
-  const best =
+  const thumb =
     thumbs.maxres?.url ||
     thumbs.standard?.url ||
     thumbs.high?.url ||
     thumbs.medium?.url ||
-    thumbs.default?.url;
+    thumbs.default?.url ||
+    "";
 
   return {
-    videoId,
-    title: sn?.title ?? videoId,
+    id: item.id,
+    title: sn?.title ?? "",
     channelTitle: sn?.channelTitle ?? "",
-    publishedAt: sn?.publishedAt,
-    thumbnailUrl: best,
+    publishedAt: sn?.publishedAt ?? "",
+    thumbnailUrl: thumb,
   };
 }
 
-export async function fetchTopLevelComments(opts: { apiKey: string; videoId: string; maxComments: number }): Promise<YouTubeComment[]> {
-  const { apiKey, videoId, maxComments } = opts;
+export async function fetchTopLevelComments(args: {
+  apiKey: string;
+  videoId: string;
+  maxComments: number;
+}): Promise<YouTubeComment[]> {
+  const { apiKey, videoId, maxComments } = args;
 
-  const url =
-    `https://www.googleapis.com/youtube/v3/commentThreads` +
-    `?part=snippet&videoId=${encodeURIComponent(videoId)}` +
-    `&maxResults=${Math.min(100, maxComments)}&key=${encodeURIComponent(apiKey)}`;
+  const out: YouTubeComment[] = [];
+  let pageToken: string | undefined;
 
-  const res = await fetch(url, { cache: "no-store" });
-  const data = await res.json();
+  // YouTube API maxResults max is 100
+  const pageSize = Math.min(100, Math.max(1, Math.floor(maxComments)));
 
-  if (!res.ok) {
-    throw new Error(data?.error?.message ?? "YouTube commentThreads.list failed");
+  while (out.length < maxComments) {
+    const url =
+      "https://www.googleapis.com/youtube/v3/commentThreads" +
+      `?part=snippet&videoId=${encodeURIComponent(videoId)}` +
+      `&maxResults=${pageSize}` +
+      `&textFormat=plainText` +
+      (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "") +
+      `&key=${encodeURIComponent(apiKey)}`;
+
+    const data = await ytFetch(url);
+
+    const items = data?.items ?? [];
+    for (const it of items) {
+      const c = it?.snippet?.topLevelComment;
+      const cs = c?.snippet;
+      if (!c?.id || !cs) continue;
+
+      out.push({
+        id: c.id,
+        author: cs.authorDisplayName ?? "",
+        text: cs.textDisplay ?? "",
+        likeCount: Number(cs.likeCount ?? 0),
+        publishedAt: cs.publishedAt ?? "",
+        authorChannelId: cs.authorChannelId?.value ?? undefined,
+        authorProfileImageUrl: cs.authorProfileImageUrl ?? undefined,
+      });
+
+      if (out.length >= maxComments) break;
+    }
+
+    pageToken = data?.nextPageToken;
+    if (!pageToken) break;
   }
 
-  const comments: YouTubeComment[] = [];
-  for (const item of data?.items ?? []) {
-    const sn = item.snippet.topLevelComment.snippet;
-    comments.push({
-      text: sn.textDisplay,
-      authorDisplayName: sn.authorDisplayName,
-      publishedAt: sn.publishedAt,
-      likeCount: sn.likeCount,
-    });
-  }
-
-  return comments;
+  return out;
 }
